@@ -1,326 +1,454 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
-from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
 
-class SAP2000ShellAnalyzer:
-    def __init__(self, excel_file_path):
+# Use basic matplotlib style to avoid seaborn conflicts
+plt.style.use('default')
+
+class SAP2000AnalyzerSimple:
+    def __init__(self, file_path):
         """
-        Initialize the SAP2000 Shell Analyzer
-        
-        Parameters:
-        excel_file_path (str): Path to the Excel file
+        SAP2000 Shell Analyzer - Simplified version without seaborn dependencies
         """
-        self.file_path = excel_file_path
+        self.file_path = file_path
+        self.raw_data = None
         self.data = None
         self.load_cases = []
         self.envelope_data = None
+        self.table_title = ""
+        self.units = {}
         
-    def read_excel_data(self, sheet_name=0):
-        """
-        Read Excel data with SAP2000 format:
-        Row 1: Table title
-        Row 2: Column names
-        Row 3: Units
-        Row 4+: Data
-        """
+    def read_data(self, sheet_name=0):
+        """Read SAP2000 data file"""
         try:
-            # Read the raw data
-            raw_data = pd.read_excel(self.file_path, sheet_name=sheet_name, header=None)
+            print("🔍 Reading SAP2000 data file...")
             
-            # Extract components
-            table_title = raw_data.iloc[0, 0] if not pd.isna(raw_data.iloc[0, 0]) else "SAP2000 Shell Data"
+            if self.file_path.lower().endswith('.csv'):
+                raw_data = pd.read_csv(self.file_path, header=None)
+            else:
+                raw_data = pd.read_excel(self.file_path, sheet_name=sheet_name, header=None)
+            
+            self.table_title = raw_data.iloc[0, 0] if not pd.isna(raw_data.iloc[0, 0]) else "SAP2000 Shell Data"
             column_names = raw_data.iloc[1, :].values
             units = raw_data.iloc[2, :].values
             
-            # Create DataFrame with proper headers
+            self.raw_data = raw_data.copy()
+            
             data = raw_data.iloc[3:, :].copy()
             data.columns = column_names
+            data = data.dropna(how='all').reset_index(drop=True)
             
-            # Clean up the data
-            data = data.dropna(how='all')  # Remove completely empty rows
-            data = data.reset_index(drop=True)
-            
-            # Convert numeric columns
-            numeric_columns = ['As1Top', 'As2Top', 'As1Bot', 'As2Bot', 'Asw/s', 'Asw1/s', 'Asw2/s', 
-                             'TopLayThick', 'BotLayThick', 'JointThick', 'CoverTop1', 'CoverTop2', 
-                             'CoverBot1', 'CoverBot2', 'RebarPct', 'F11', 'F22', 'F12']
-            
-            for col in numeric_columns:
-                if col in data.columns:
-                    data[col] = pd.to_numeric(data[col], errors='coerce')
-            
-            self.data = data
-            self.table_title = table_title
             self.units = dict(zip(column_names, units))
             
-            print(f"✓ Successfully loaded: {table_title}")
-            print(f"✓ Data shape: {data.shape}")
-            print(f"✓ Available columns: {list(data.columns)}")
+            print(f"✅ Successfully loaded: {self.table_title}")
+            print(f"📊 Raw data shape: {data.shape}")
+            print(f"📋 Available columns: {list(data.columns)}")
             
-            # Identify unique load cases
+            # Convert numeric columns
+            numeric_columns = [
+                'Area', 'As1Top', 'As2Top', 'As1Bot', 'As2Bot', 
+                'Asw/s', 'Asw1/s', 'Asw2/s', 'TopLayThick', 'BotLayThick', 
+                'JointThick', 'CoverTop1', 'CoverTop2', 'CoverBot1', 'CoverBot2', 
+                'F11', 'F22', 'F12', 'M11', 'M22', 'M12', 'V13', 'V23'
+            ]
+            
+            conversion_success = []
+            for col in numeric_columns:
+                if col in data.columns:
+                    try:
+                        data[col] = pd.to_numeric(data[col], errors='coerce')
+                        conversion_success.append(col)
+                    except:
+                        pass
+            
+            print(f"🔢 Converted {len(conversion_success)} columns to numeric")
+            
+            if 'Area' in data.columns:
+                original_length = len(data)
+                data = data.dropna(subset=['Area'])
+                removed_rows = original_length - len(data)
+                if removed_rows > 0:
+                    print(f"🧹 Removed {removed_rows} rows with missing Area values")
+            
+            self.data = data
+            
             if 'OutputCase' in data.columns:
-                self.load_cases = data['OutputCase'].unique().tolist()
-                print(f"✓ Found {len(self.load_cases)} load cases: {self.load_cases}")
+                self.load_cases = sorted(data['OutputCase'].unique().tolist())
+                print(f"📂 Found {len(self.load_cases)} load cases: {self.load_cases}")
+            
+            if 'Area' in data.columns:
+                unique_areas = sorted(data['Area'].unique())
+                print(f"🏗️ Found {len(unique_areas)} unique elements: {unique_areas}")
             
             return True
             
         except Exception as e:
-            print(f"❌ Error reading Excel file: {str(e)}")
+            print(f"❌ Error reading file: {str(e)}")
             return False
     
     def create_reinforcement_envelope(self):
-        """
-        Create envelope of maximum reinforcement for top and bottom
-        """
+        """Create reinforcement envelope"""
         if self.data is None:
-            print("❌ No data loaded. Please run read_excel_data() first.")
+            print("❌ No data loaded. Please run read_data() first.")
             return None
         
         try:
-            # Group by element and find maximum reinforcement
-            envelope_cols = ['Area', 'ElemType', 'ShellType']
-            rebar_cols = ['As1Top', 'As2Top', 'As1Bot', 'As2Bot']
+            print("\n🎯 Creating REINFORCEMENT ENVELOPE...")
+            print("=" * 50)
             
-            # Add any other columns you want to keep
+            required_rebar_cols = ['As1Top', 'As2Top', 'As1Bot', 'As2Bot']
+            available_rebar_cols = [col for col in required_rebar_cols if col in self.data.columns]
+            
+            if len(available_rebar_cols) == 0:
+                print("❌ No reinforcement columns found!")
+                return None
+            
+            print(f"🔍 Available reinforcement columns: {available_rebar_cols}")
+            
+            envelope_agg = {'OutputCase': lambda x: ', '.join(x.astype(str))}
+            
+            info_cols = ['ElemType', 'ShellType', 'DesignType']
+            for col in info_cols:
+                if col in self.data.columns:
+                    envelope_agg[col] = 'first'
+            
+            for col in available_rebar_cols:
+                envelope_agg[col] = 'max'
+            
             other_cols = ['TopLayThick', 'BotLayThick', 'JointThick']
+            for col in other_cols:
+                if col in self.data.columns:
+                    envelope_agg[col] = 'first'
             
-            all_cols = envelope_cols + rebar_cols + other_cols
-            available_cols = [col for col in all_cols if col in self.data.columns]
+            envelope = self.data.groupby('Area').agg(envelope_agg).reset_index()
             
-            # Create envelope by taking maximum values for each element
-            envelope = self.data.groupby('Area').agg({
-                **{col: 'first' for col in envelope_cols if col in self.data.columns},
-                **{col: 'max' for col in rebar_cols if col in self.data.columns},
-                **{col: 'first' for col in other_cols if col in self.data.columns},
-                'OutputCase': lambda x: ', '.join(x.astype(str))  # Combine all load cases
-            }).reset_index()
+            if 'As1Top' in envelope.columns and 'As2Top' in envelope.columns:
+                envelope['MaxTopRebar'] = envelope[['As1Top', 'As2Top']].max(axis=1)
+                envelope['TopDirection'] = envelope[['As1Top', 'As2Top']].idxmax(axis=1)
             
-            # Calculate envelope reinforcement
-            envelope['MaxTopRebar'] = envelope[['As1Top', 'As2Top']].max(axis=1)
-            envelope['MaxBotRebar'] = envelope[['As1Bot', 'As2Bot']].max(axis=1)
-            envelope['MaxOverallRebar'] = envelope[['MaxTopRebar', 'MaxBotRebar']].max(axis=1)
+            if 'As1Bot' in envelope.columns and 'As2Bot' in envelope.columns:
+                envelope['MaxBotRebar'] = envelope[['As1Bot', 'As2Bot']].max(axis=1)
+                envelope['BotDirection'] = envelope[['As1Bot', 'As2Bot']].idxmax(axis=1)
             
-            # Add direction indicators
-            envelope['TopDirection'] = envelope[['As1Top', 'As2Top']].idxmax(axis=1)
-            envelope['BotDirection'] = envelope[['As1Bot', 'As2Bot']].idxmax(axis=1)
+            if 'MaxTopRebar' in envelope.columns and 'MaxBotRebar' in envelope.columns:
+                envelope['MaxOverallRebar'] = envelope[['MaxTopRebar', 'MaxBotRebar']].max(axis=1)
+                envelope['GoverningLocation'] = envelope[['MaxTopRebar', 'MaxBotRebar']].idxmax(axis=1)
+            
+            if 'MaxTopRebar' in envelope.columns and 'MaxBotRebar' in envelope.columns:
+                envelope['TopBottomRatio'] = envelope['MaxTopRebar'] / envelope['MaxBotRebar']
+                envelope['ReinforcementClass'] = pd.cut(envelope['MaxOverallRebar'], 
+                                                      bins=[0, 0.2, 0.5, 1.0, float('inf')], 
+                                                      labels=['Light', 'Moderate', 'Heavy', 'Very Heavy'])
             
             self.envelope_data = envelope
             
-            print(f"✓ Envelope created with {len(envelope)} elements")
+            print(f"✅ Envelope created for {len(envelope)} elements")
+            print(f"📊 Envelope columns: {list(envelope.columns)}")
+            
             return envelope
             
         except Exception as e:
             print(f"❌ Error creating envelope: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return None
     
-    def get_summary_statistics(self):
-        """
-        Get summary statistics of the reinforcement
-        """
-        if self.envelope_data is None:
-            print("❌ No envelope data. Please run create_reinforcement_envelope() first.")
+    def analyze_full_data(self):
+        """Comprehensive analysis of all data"""
+        if self.data is None:
+            print("❌ No data loaded.")
             return None
         
+        print("\n📈 COMPREHENSIVE DATA ANALYSIS")
+        print("=" * 50)
+        
+        numeric_cols = self.data.select_dtypes(include=[np.number]).columns
+        print(f"📊 Analyzing {len(numeric_cols)} numeric columns")
+        
+        if 'OutputCase' in self.data.columns:
+            print(f"\n📂 LOAD CASE ANALYSIS:")
+            for case in self.load_cases:
+                case_data = self.data[self.data['OutputCase'] == case]
+                print(f"   {case}: {len(case_data)} elements")
+        
+        if 'Area' in self.data.columns:
+            print(f"\n🏗️ ELEMENT ANALYSIS:")
+            element_counts = self.data['Area'].value_counts().sort_index()
+            for area, count in element_counts.items():
+                print(f"   Element {area}: {count} load case results")
+        
+        force_cols = [col for col in ['F11', 'F22', 'F12', 'M11', 'M22', 'M12', 'V13', 'V23'] 
+                     if col in self.data.columns]
+        
+        if force_cols:
+            print(f"\n⚡ FORCES/MOMENTS SUMMARY:")
+            for col in force_cols[:3]:
+                values = self.data[col].dropna()
+                if len(values) > 0:
+                    print(f"   {col}: Min={values.min():.1f}, Max={values.max():.1f}, Mean={values.mean():.1f}")
+        
+        return True
+    
+    def get_envelope_statistics(self):
+        """Detailed statistics for reinforcement envelope"""
+        if self.envelope_data is None:
+            print("❌ No envelope data. Run create_reinforcement_envelope() first.")
+            return None
+        
+        print("\n📊 ENVELOPE STATISTICS")
+        print("=" * 50)
+        
         stats = {}
-        
-        # Overall statistics
         rebar_cols = ['As1Top', 'As2Top', 'As1Bot', 'As2Bot', 'MaxTopRebar', 'MaxBotRebar', 'MaxOverallRebar']
-        available_rebar_cols = [col for col in rebar_cols if col in self.envelope_data.columns]
+        available_cols = [col for col in rebar_cols if col in self.envelope_data.columns]
         
-        for col in available_rebar_cols:
+        for col in available_cols:
+            values = self.envelope_data[col].dropna()
             stats[col] = {
-                'min': self.envelope_data[col].min(),
-                'max': self.envelope_data[col].max(),
-                'mean': self.envelope_data[col].mean(),
-                'std': self.envelope_data[col].std(),
-                'count': self.envelope_data[col].count()
+                'min': values.min(),
+                'max': values.max(),
+                'mean': values.mean(),
+                'std': values.std(),
+                'count': len(values)
             }
+            
+            print(f"\n{col} ({self.units.get(col, 'units')}):")
+            print(f"   Min:  {stats[col]['min']:.3f}")
+            print(f"   Max:  {stats[col]['max']:.3f}")
+            print(f"   Mean: {stats[col]['mean']:.3f}")
+            print(f"   Std:  {stats[col]['std']:.3f}")
         
         return stats
     
-    def find_critical_elements(self, top_n=10):
-        """
-        Find elements with highest reinforcement requirements
-        """
+    def find_critical_elements(self, top_n=5):
+        """Find elements with highest reinforcement"""
         if self.envelope_data is None:
-            print("❌ No envelope data. Please run create_reinforcement_envelope() first.")
+            print("❌ No envelope data available.")
             return None
         
-        # Sort by maximum overall reinforcement
+        print(f"\n🔥 TOP {top_n} CRITICAL ELEMENTS")
+        print("=" * 50)
+        
+        if 'MaxOverallRebar' not in self.envelope_data.columns:
+            print("❌ MaxOverallRebar not available.")
+            return None
+        
         critical = self.envelope_data.nlargest(top_n, 'MaxOverallRebar')
         
-        return critical[['Area', 'ElemType', 'MaxTopRebar', 'MaxBotRebar', 'MaxOverallRebar', 'OutputCase']]
+        display_cols = ['Area', 'MaxTopRebar', 'MaxBotRebar', 'MaxOverallRebar', 
+                       'TopDirection', 'BotDirection', 'GoverningLocation']
+        available_display_cols = [col for col in display_cols if col in critical.columns]
+        
+        result = critical[available_display_cols]
+        print(result.to_string(index=False, float_format='%.3f'))
+        
+        return result
     
-    def plot_reinforcement_distribution(self, figsize=(15, 10)):
-        """
-        Create comprehensive plots of reinforcement distribution
-        """
+    def create_simple_plots(self, figsize=(16, 10)):
+        """Create simple, reliable plots using only matplotlib"""
         if self.envelope_data is None:
-            print("❌ No envelope data. Please run create_reinforcement_envelope() first.")
+            print("❌ No envelope data for plotting.")
             return None
         
-        fig, axes = plt.subplots(2, 3, figsize=figsize)
-        fig.suptitle('SAP2000 Shell Reinforcement Analysis', fontsize=16, fontweight='bold')
+        print("\n🎨 CREATING VISUALIZATIONS...")
+        print("=" * 50)
         
-        # 1. Top vs Bottom Reinforcement Scatter
-        axes[0,0].scatter(self.envelope_data['MaxTopRebar'], self.envelope_data['MaxBotRebar'], 
-                         alpha=0.6, s=20)
-        axes[0,0].set_xlabel('Max Top Reinforcement')
-        axes[0,0].set_ylabel('Max Bottom Reinforcement')
-        axes[0,0].set_title('Top vs Bottom Reinforcement')
-        axes[0,0].grid(True, alpha=0.3)
-        
-        # Add diagonal line
-        max_val = max(self.envelope_data['MaxTopRebar'].max(), self.envelope_data['MaxBotRebar'].max())
-        axes[0,0].plot([0, max_val], [0, max_val], 'r--', alpha=0.5, label='Equal reinforcement')
-        axes[0,0].legend()
-        
-        # 2. Overall Reinforcement Distribution
-        axes[0,1].hist(self.envelope_data['MaxOverallRebar'], bins=30, alpha=0.7, edgecolor='black')
-        axes[0,1].set_xlabel('Max Overall Reinforcement')
-        axes[0,1].set_ylabel('Frequency')
-        axes[0,1].set_title('Overall Reinforcement Distribution')
-        axes[0,1].grid(True, alpha=0.3)
-        
-        # 3. Top Reinforcement by Direction
-        if 'As1Top' in self.envelope_data.columns and 'As2Top' in self.envelope_data.columns:
-            axes[0,2].scatter(self.envelope_data['As1Top'], self.envelope_data['As2Top'], alpha=0.6, s=20)
-            axes[0,2].set_xlabel('As1 Top Reinforcement')
-            axes[0,2].set_ylabel('As2 Top Reinforcement')
-            axes[0,2].set_title('Top Reinforcement Directions')
-            axes[0,2].grid(True, alpha=0.3)
-        
-        # 4. Bottom Reinforcement by Direction
-        if 'As1Bot' in self.envelope_data.columns and 'As2Bot' in self.envelope_data.columns:
-            axes[1,0].scatter(self.envelope_data['As1Bot'], self.envelope_data['As2Bot'], alpha=0.6, s=20)
-            axes[1,0].set_xlabel('As1 Bottom Reinforcement')
-            axes[1,0].set_ylabel('As2 Bottom Reinforcement')
-            axes[1,0].set_title('Bottom Reinforcement Directions')
-            axes[1,0].grid(True, alpha=0.3)
-        
-        # 5. Element-wise Maximum Reinforcement
-        element_subset = self.envelope_data.head(50)  # Show first 50 elements
-        axes[1,1].bar(range(len(element_subset)), element_subset['MaxOverallRebar'])
-        axes[1,1].set_xlabel('Element Index (first 50)')
-        axes[1,1].set_ylabel('Max Reinforcement')
-        axes[1,1].set_title('Max Reinforcement by Element')
-        axes[1,1].grid(True, alpha=0.3)
-        
-        # 6. Box plot comparison
-        rebar_data = []
-        labels = []
-        for col in ['As1Top', 'As2Top', 'As1Bot', 'As2Bot']:
-            if col in self.envelope_data.columns:
-                rebar_data.append(self.envelope_data[col].dropna())
-                labels.append(col)
-        
-        if rebar_data:
-            axes[1,2].boxplot(rebar_data, labels=labels)
-            axes[1,2].set_ylabel('Reinforcement')
-            axes[1,2].set_title('Reinforcement Comparison')
-            axes[1,2].grid(True, alpha=0.3)
-            plt.setp(axes[1,2].get_xticklabels(), rotation=45)
-        
-        plt.tight_layout()
-        plt.show()
-        
-        return fig
+        try:
+            # Create figure with subplots
+            fig, axes = plt.subplots(2, 3, figsize=figsize)
+            fig.suptitle(f'{self.table_title}\nReinforcement Envelope Analysis', 
+                        fontsize=16, fontweight='bold')
+            
+            # Colors for consistency
+            colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD']
+            
+            # Plot 1: Top vs Bottom Reinforcement
+            ax1 = axes[0, 0]
+            if 'MaxTopRebar' in self.envelope_data.columns and 'MaxBotRebar' in self.envelope_data.columns:
+                ax1.scatter(self.envelope_data['MaxTopRebar'], self.envelope_data['MaxBotRebar'], 
+                           s=120, alpha=0.7, color=colors[0])
+                ax1.set_xlabel('Max Top Reinforcement (mm²/mm)')
+                ax1.set_ylabel('Max Bottom Reinforcement (mm²/mm)')
+                ax1.set_title('Top vs Bottom Reinforcement', fontweight='bold')
+                ax1.grid(True, alpha=0.3)
+                
+                # Add diagonal line
+                max_val = max(self.envelope_data['MaxTopRebar'].max(), self.envelope_data['MaxBotRebar'].max())
+                ax1.plot([0, max_val], [0, max_val], 'r--', alpha=0.5, label='Equal reinforcement')
+                ax1.legend()
+                
+                # Add element labels
+                for i, row in self.envelope_data.iterrows():
+                    ax1.annotate(f'E{int(row["Area"])}', 
+                               (row['MaxTopRebar'], row['MaxBotRebar']),
+                               xytext=(5, 5), textcoords='offset points', fontsize=9)
+            
+            # Plot 2: Overall Reinforcement by Element
+            ax2 = axes[0, 1]
+            if 'MaxOverallRebar' in self.envelope_data.columns:
+                bars = ax2.bar(self.envelope_data['Area'].astype(str), 
+                              self.envelope_data['MaxOverallRebar'], 
+                              color=colors[:len(self.envelope_data)])
+                ax2.set_xlabel('Element Area')
+                ax2.set_ylabel('Max Overall Reinforcement (mm²/mm)')
+                ax2.set_title('Max Reinforcement by Element', fontweight='bold')
+                ax2.grid(True, alpha=0.3, axis='y')
+                
+                # Add value labels on bars
+                for bar, value in zip(bars, self.envelope_data['MaxOverallRebar']):
+                    height = bar.get_height()
+                    ax2.text(bar.get_x() + bar.get_width()/2., height + height*0.01,
+                            f'{value:.3f}', ha='center', va='bottom', fontweight='bold')
+            
+            # Plot 3: Reinforcement Distribution
+            ax3 = axes[0, 2]
+            if 'MaxOverallRebar' in self.envelope_data.columns:
+                ax3.hist(self.envelope_data['MaxOverallRebar'], bins=5, alpha=0.7, 
+                        color=colors[1], edgecolor='black', linewidth=1.5)
+                ax3.set_xlabel('Max Overall Reinforcement (mm²/mm)')
+                ax3.set_ylabel('Frequency')
+                ax3.set_title('Reinforcement Distribution', fontweight='bold')
+                ax3.grid(True, alpha=0.3)
+            
+            # Plot 4: Top Reinforcement Directions
+            ax4 = axes[1, 0]
+            if 'As1Top' in self.envelope_data.columns and 'As2Top' in self.envelope_data.columns:
+                ax4.scatter(self.envelope_data['As1Top'], self.envelope_data['As2Top'], 
+                           s=120, alpha=0.7, color=colors[2])
+                ax4.set_xlabel('As1 Top Reinforcement (mm²/mm)')
+                ax4.set_ylabel('As2 Top Reinforcement (mm²/mm)')
+                ax4.set_title('Top Reinforcement Directions', fontweight='bold')
+                ax4.grid(True, alpha=0.3)
+                
+                # Add element labels
+                for i, row in self.envelope_data.iterrows():
+                    ax4.annotate(f'E{int(row["Area"])}', 
+                               (row['As1Top'], row['As2Top']),
+                               xytext=(5, 5), textcoords='offset points', fontsize=9)
+            
+            # Plot 5: Bottom Reinforcement Directions
+            ax5 = axes[1, 1]
+            if 'As1Bot' in self.envelope_data.columns and 'As2Bot' in self.envelope_data.columns:
+                ax5.scatter(self.envelope_data['As1Bot'], self.envelope_data['As2Bot'], 
+                           s=120, alpha=0.7, color=colors[3])
+                ax5.set_xlabel('As1 Bottom Reinforcement (mm²/mm)')
+                ax5.set_ylabel('As2 Bottom Reinforcement (mm²/mm)')
+                ax5.set_title('Bottom Reinforcement Directions', fontweight='bold')
+                ax5.grid(True, alpha=0.3)
+                
+                # Add element labels
+                for i, row in self.envelope_data.iterrows():
+                    ax5.annotate(f'E{int(row["Area"])}', 
+                               (row['As1Bot'], row['As2Bot']),
+                               xytext=(5, 5), textcoords='offset points', fontsize=9)
+            
+            # Plot 6: Load Case Contributions
+            ax6 = axes[1, 2]
+            if len(self.load_cases) > 1:
+                case_max_values = {}
+                for case in self.load_cases:
+                    case_data = self.data[self.data['OutputCase'] == case]
+                    if 'MaxOverallRebar' in self.envelope_data.columns:
+                        # Get the maximum reinforcement for this load case
+                        case_max = 0
+                        for _, row in case_data.iterrows():
+                            if 'As1Top' in case_data.columns and 'As2Top' in case_data.columns:
+                                top_max = max(row.get('As1Top', 0), row.get('As2Top', 0))
+                                bot_max = max(row.get('As1Bot', 0), row.get('As2Bot', 0))
+                                overall_max = max(top_max, bot_max)
+                                case_max = max(case_max, overall_max)
+                        case_max_values[str(case)] = case_max
+                
+                if case_max_values and sum(case_max_values.values()) > 0:
+                    wedges, texts, autotexts = ax6.pie(case_max_values.values(), 
+                                                      labels=case_max_values.keys(), 
+                                                      autopct='%1.1f%%', startangle=90,
+                                                      colors=colors[:len(case_max_values)])
+                    ax6.set_title('Load Case Max Contributions', fontweight='bold')
+                else:
+                    ax6.text(0.5, 0.5, 'Load Case\nData Not Available', 
+                            ha='center', va='center', transform=ax6.transAxes, fontsize=12)
+            else:
+                ax6.text(0.5, 0.5, 'Single Load Case\nNo Comparison', 
+                        ha='center', va='center', transform=ax6.transAxes, fontsize=12)
+            
+            plt.tight_layout()
+            plt.show()
+            
+            print("✅ Visualizations created successfully!")
+            return fig
+            
+        except Exception as e:
+            print(f"❌ Error creating plots: {str(e)}")
+            print("📊 Continuing with text-based analysis...")
+            return None
     
-    def export_results(self, output_path="sap2000_envelope_results.xlsx"):
-        """
-        Export envelope results to Excel
-        """
+    def export_results(self, output_path="SAP2000_Analysis_Results.xlsx"):
+        """Export results to Excel"""
         if self.envelope_data is None:
             print("❌ No envelope data to export.")
             return False
         
         try:
+            print(f"\n💾 EXPORTING RESULTS...")
+            print("=" * 50)
+            
             with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-                # Main envelope data
-                self.envelope_data.to_excel(writer, sheet_name='Envelope_Data', index=False)
+                # Reinforcement Envelope
+                self.envelope_data.to_excel(writer, sheet_name='Reinforcement_Envelope', index=False)
+                print("✅ Reinforcement envelope exported")
                 
-                # Summary statistics
-                stats = self.get_summary_statistics()
+                # Full Data
+                self.data.to_excel(writer, sheet_name='Full_Data', index=False)
+                print("✅ Full data exported")
+                
+                # Statistics
+                stats = self.get_envelope_statistics()
                 if stats:
                     stats_df = pd.DataFrame(stats).T
-                    stats_df.to_excel(writer, sheet_name='Summary_Statistics')
+                    stats_df.to_excel(writer, sheet_name='Statistics')
+                    print("✅ Statistics exported")
                 
-                # Critical elements
-                critical = self.find_critical_elements(20)
+                # Critical Elements
+                critical = self.find_critical_elements(10)
                 if critical is not None:
                     critical.to_excel(writer, sheet_name='Critical_Elements', index=False)
+                    print("✅ Critical elements exported")
             
-            print(f"✓ Results exported to: {output_path}")
+            print(f"🎉 Results exported to: {output_path}")
             return True
             
         except Exception as e:
-            print(f"❌ Error exporting results: {str(e)}")
+            print(f"❌ Error exporting: {str(e)}")
             return False
-
-# Example usage
-def main():
-    """
-    Example of how to use the SAP2000ShellAnalyzer
-    """
-    # Initialize analyzer
-    analyzer = SAP2000ShellAnalyzer("your_sap2000_file.xlsx")
     
-    # Step 1: Read the data
-    if analyzer.read_excel_data():
+    def run_complete_analysis(self):
+        """Run complete analysis workflow"""
+        print("🚀 STARTING SAP2000 ANALYSIS")
+        print("=" * 60)
         
-        # Step 2: Create reinforcement envelope
-        envelope = analyzer.create_reinforcement_envelope()
+        if not self.read_data():
+            return False
         
-        if envelope is not None:
-            # Step 3: Display summary
-            print("\n" + "="*60)
-            print("REINFORCEMENT ENVELOPE SUMMARY")
-            print("="*60)
-            
-            stats = analyzer.get_summary_statistics()
-            if stats:
-                for rebar_type, stat_dict in stats.items():
-                    print(f"\n{rebar_type}:")
-                    print(f"  Min: {stat_dict['min']:.3f}")
-                    print(f"  Max: {stat_dict['max']:.3f}")
-                    print(f"  Mean: {stat_dict['mean']:.3f}")
-                    print(f"  Std: {stat_dict['std']:.3f}")
-            
-            # Step 4: Show critical elements
-            print(f"\n" + "="*60)
-            print("TOP 10 CRITICAL ELEMENTS")
-            print("="*60)
-            critical = analyzer.find_critical_elements(10)
-            if critical is not None:
-                print(critical.to_string(index=False))
-            
-            # Step 5: Create plots
-            analyzer.plot_reinforcement_distribution()
-            
-            # Step 6: Export results
-            analyzer.export_results("sap2000_envelope_analysis.xlsx")
+        self.analyze_full_data()
+        
+        envelope = self.create_reinforcement_envelope()
+        if envelope is None:
+            return False
+        
+        self.get_envelope_statistics()
+        self.find_critical_elements()
+        self.create_simple_plots()
+        self.export_results()
+        
+        print("\n🎉 ANALYSIS COMPLETED SUCCESSFULLY!")
+        print("=" * 60)
+        
+        return True
 
+# Main execution
 if __name__ == "__main__":
-    # To use this script:
-    # 1. Replace "your_sap2000_file.xlsx" with your actual file path
-    # 2. Run the script
-    
-    print("SAP2000 Shell Reinforcement Envelope Analyzer")
-    print("=" * 50)
-    print("Instructions:")
-    print("1. Update the file path in the main() function")
-    print("2. Run the script")
-    print("3. The script will:")
-    print("   - Read your SAP2000 Excel data")
-    print("   - Create reinforcement envelopes")
-    print("   - Find maximum and minimum values")
-    print("   - Generate plots")
-    print("   - Export results to Excel")
-    print("\nTo run: python sap2000_analysis.py")
-    
-    # Uncomment the next line to run the analysis
-    # main()
+    analyzer = SAP2000AnalyzerSimple("sap2000_sample_data.csv")
+    analyzer.run_complete_analysis()
